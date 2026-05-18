@@ -1,15 +1,15 @@
 # CAIE — Cognitive Adaptation in the Intelligence Era
 
-This repository contains the simulation code and figures for the paper:
-
 **"Cognitive Adaptation in the Intelligence Era (CAIE): A Dynamical Systems Framework for Education Reform in the Age of Artificial Intelligence"**
 
 Author: Chung Ming Chen  
 Submitted to: Frontiers in Education
 
+This repository contains the simulation code and figures for the paper:
+
 ---
 
-## Repository Contents
+## Contents
 
 ```
 math/
@@ -20,7 +20,7 @@ caie_fig5_sensitivity_tornado.png  # Sensitivity tornado chart (Figure in paper)
 
 ---
 
-## Requirements
+## System Requirements
 
 - Python 3.8+
 - numpy
