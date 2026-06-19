@@ -108,8 +108,8 @@ def education_function(t, scenario='none'):
     elif scenario == 'traditional':
         # 傳統教育：主要強化 WM 和 IX，對 MA/MR/EI/ID 投入少
         e = np.array([0.3, 0.1, 0.3, 0.05, 0.1, 0.1, 0.05])
-    elif scenario == 'caie':
-        # CAIE 教育模型：全維度均衡訓練
+    elif scenario in ('caie', 'caie_norpe'):
+        # CAIE 教育模型：全維度均衡訓練（caie_norpe 為移除 RPE 調制的對照組）
         e = np.array([0.4, 0.35, 0.4, 0.45, 0.35, 0.3, 0.3])
         # 漸進式導入（2025 年後逐步增強）
         ramp = 1.0 / (1.0 + np.exp(-0.5 * (t - 2025)))
@@ -133,51 +133,64 @@ def rpe_drive(s, s_prev):
 # 3. ODE 系統
 # ============================================================
 
+# --- 修訂後動力學係數（對齊論文 Eq.(2) 的 master ODE 形式）---
+K_COV = 3.0          # 課程對技術需求的覆蓋係數
+GAMMA_DECAY = 0.22   # 未被滿足的技術壓力對能力的侵蝕率
+BASE_DECAY = 0.01    # 基線遺忘/退化率
+
+
 def caie_ode(t, state, age_at_t0, t0, scenario, n_agents):
     """
-    CAIE 動力學方程
+    CAIE 動力學方程（對齊論文 master ODE：dS/dt = E_eff - R_tech - D_res - D_cum）
+
+    重要修訂：
+      * 技術壓力為「需求」，未被教育覆蓋時侵蝕能力（論文中 R_tech 為減項），
+        而非舊版的 +β·∇P 直接增益——後者會讓所有情境都成長，與論文敘述矛盾。
+      * 能力狀態 S 在每步夾在 [0,1]，符合 §2.1 的正規化定義。
+
     state[:7] = S(t) 能力向量
     state[7:14] = D_cum(t) 累積損傷
     state[14:21] = proficiency(t) 熟練度
     """
-    s = np.clip(state[:7], 0.01, None)
+    s = np.clip(state[:7], 0.0, 1.0)
     d_cum = state[7:14]
     prof = np.clip(state[14:21], 0, 0.99)
 
     age = age_at_t0 + (t - t0)
+    s_ceiling = s_max(age)            # 發育上界
 
-    # 發育上界
-    s_ceiling = s_max(age)
+    # 技術需求（隨三次革命上升的 sigmoid 合成）
+    demand = tech_pressure(t)
 
-    # 技術壓力
-    p = tech_pressure(t)
-
-    # 壓力梯度（壓力方向）
-    grad_p = np.clip(p - s, 0, None)
-
-    # 教育
+    # 教育投入（情境決定），由 RPE/多巴胺驅動調制
     e = education_function(t, scenario)
+    grad_p = np.clip(demand - s, 0, None)
+    d_drive = D0 + MU_RPE * np.clip(grad_p * 0.3, -0.3, 0.3)   # RPE 代理
+    if scenario == 'caie_norpe':
+        d_drive = D0          # 對照組：移除 RPE/多巴胺調制
+    e_eff = e * d_drive
 
-    # RPE 驅動（用簡化的壓力差當作 RPE 代理）
-    d_drive = D0 + MU_RPE * np.clip(grad_p * 0.3, -0.3, 0.3)
-
-    # 有效教育
-    e_eff = e * d_drive * np.clip(1.0 - s / s_ceiling, 0, 1)
+    # 未被課程覆蓋的技術需求 → 造成能力侵蝕
+    unmet = np.clip(demand - K_COV * e_eff, 0, None)
 
     # 認知阻力
     s_old = np.array([0.3, 0.3, 0.3, 0.1, 0.2, 0.4, 0.5])  # 前AI時代基線
     r = cognitive_resistance(s, age, n_agents, s_old)
 
-    # 動力學方程
-    ds_dt = ALPHA * e_eff + BETA * grad_p - GAMMA * r - DELTA * d_cum
+    # master ODE：教育成長 − 未滿足壓力侵蝕 − 阻力 − 累積損傷 − 基線退化
+    growth = ALPHA * e_eff * np.clip(s_ceiling - s, 0.0, 1.0)
+    erosion = GAMMA_DECAY * unmet * (s + 0.05)
+    ds_dt = growth - erosion - 0.1 * r * s - DELTA * d_cum - BASE_DECAY * s
 
-    # 發育約束：不超過上界
+    # 邊界約束：S 維持在 [0, 上界]
     for i in range(N_DIM):
+        if (s[i] >= 1.0 and ds_dt[i] > 0) or (s[i] <= 0.0 and ds_dt[i] < 0):
+            ds_dt[i] = 0
         if s[i] >= s_ceiling[i] and ds_dt[i] > 0:
             ds_dt[i] = 0
 
     # 累積損傷演化
-    dd_cum = np.clip(p - s, 0, None) * 0.1
+    dd_cum = np.clip(demand - s, 0, None) * 0.05
 
     # 熟練度演化
     dprof = PHI * e * (1.0 - prof)
@@ -206,6 +219,8 @@ def run_simulation(scenario='none', age_start=25, n_agents=3,
         t_eval=t_eval, method='RK45',
         max_step=0.1
     )
+    # 能力分量正規化於 [0,1]（符合 §2.1 定義）
+    sol.y[:7] = np.clip(sol.y[:7], 0.0, 1.0)
     return sol
 
 
@@ -452,6 +467,9 @@ def plot_education_delay():
 # ============================================================
 
 if __name__ == '__main__':
+    import os
+    os.makedirs('docs', exist_ok=True)  # 確保輸出目錄存在，避免 savefig 失敗
+
     print("=" * 60)
     print("CAIE 模型模擬器")
     print("Cognitive Adaptation in the Intelligence Era")
